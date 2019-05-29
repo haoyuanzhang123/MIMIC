@@ -1,0 +1,285 @@
+---
+title: "R Markdown for KNIFE"
+author: "Haoyuan"
+date: "11 March 2019"
+output:
+  html_document:
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      toc_collapsed: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(visNetwork)
+library(bnlearn)
+library(rbmn)
+library(Rgraphviz)
+library(gRain)
+library(RPostgreSQL)
+```
+
+# Data Processing
+
+## Reading data from the database (preprocessed)
+```{r results='hide'}
+dbdriver <- 'PostgreSQL'
+host  <- '127.0.0.1'
+port  <- '5432'
+user  <- 'postgres'
+password <- 'postgres'
+dbname <- 'mimic'
+schema <- 'mimiciii'
+
+# Connect to the database using the configuration settings
+con <- dbConnect(dbDriver(dbdriver), dbname = dbname, host = host, port = port, 
+                 user = user, password = password)
+
+# Set the default schema
+dbExecute(con, paste("SET search_path TO ", schema, sep=" "))
+
+# Set the pre-processed cohort data
+sql_query <- "SELECT * FROM all_data_depression_diabete;"
+#data <- dbGetQuery(con, sql_query)
+#write.csv(data,file = "/Users/Haoyuan/GoogleDrive/Zhang Haoyuan/KNIFE/MIMIC/data.csv")
+```
+
+```{r results='hide'}
+data = read.csv("/Users/Haoyuan/GoogleDrive/Zhang Haoyuan/KNIFE/MIMIC/data.csv")
+data = data[, -1]
+head(data)
+```
+
+
+## Further processing data
+
+```{r results='hide', message=FALSE, warning=FALSE}
+tmp0 = data[!duplicated(data[,2]),]
+tmp1 = aggregate(hadm_id ~ subject_id, tmp0, function(x) length(unique(x)))
+names(tmp1)[2] <- "hadm_count"
+tmp2 = aggregate(drug ~ subject_id, tmp0, function(x) length(which(!is.na(x))))
+names(tmp2)[2] <- "prescribed"
+
+tmp0 = tmp0[-c(3,4,5,7,8)]
+tmp0 = merge(tmp0, tmp1, by ="subject_id")
+tmp0 = merge(tmp0, tmp2, by ="subject_id", all = T)
+tmp0 = tmp0[-c(2,3)]
+tmp0 = tmp0[!duplicated(tmp0[,1]),]
+tmp0[is.na(tmp0)]<-0
+tmp0$hadm_count = ifelse(tmp0$hadm_count>1, "yes", "no")
+names(tmp0)[37] <- "readmission"
+tmp0$prescribed = ifelse(tmp0$prescribed==0, "no", "yes")
+tmp0$readmission <- as.factor(tmp0$readmission)
+tmp0$prescribed <- as.factor(tmp0$prescribed)
+
+```
+
+
+## Group and discretize variables
+```{r}
+
+table(tmp0$ethnicity)
+tmp0$ethnicity <- as.character(tmp0$ethnicity)
+tmp0$ethnicity[grep("WHITE - BRAZILIAN", tmp0$ethnicity)] = "WHITE"
+tmp0$ethnicity[grep("WHITE - EASTERN EUROPEAN", tmp0$ethnicity)] = "WHITE"
+tmp0$ethnicity[grep("WHITE - OTHER EUROPEAN", tmp0$ethnicity)] = "WHITE"
+tmp0$ethnicity[grep("WHITE - RUSSIAN", tmp0$ethnicity)] = "WHITE"
+tmp0$ethnicity[grep("BLACK/AFRICAN AMERICAN", tmp0$ethnicity)] = "BLACK"
+tmp0$ethnicity[grep("BLACK/CAPE VERDEAN", tmp0$ethnicity)] = "BLACK"
+tmp0$ethnicity[tmp0$ethnicity != "WHITE" & tmp0$ethnicity != "BLACK"]= "OTHERS"
+tmp0$ethnicity <- as.factor(tmp0$ethnicity)
+table(tmp0$ethnicity)
+
+table(tmp0$marital_status)
+tmp0$marital_status <- as.character(tmp0$marital_status)
+tmp0$marital_status[tmp0$marital_status != "MARRIED" & tmp0$marital_status != "SINGLE"]= "OTHERS"
+tmp0$marital_status <- as.factor(tmp0$marital_status)
+table(tmp0$marital_status)
+
+
+tmp0$age = ifelse(tmp0$age>79, "79+",ifelse(tmp0$age>69,"69_79", ifelse(tmp0$age>59,"59_69", ifelse(tmp0$age>49,"49_59",
+                  ifelse(tmp0$age>39,"39_49", ifelse(tmp0$age>29,"29_39", ifelse(tmp0$age>19,"19_29", "19-")))))))
+tmp0$age <- as.factor(tmp0$age)
+table(tmp0$age)
+
+
+# tmp0[2] = discretize(tmp0[2], breaks =5, method = "interval")
+tmp0$sysbp_max <- as.numeric(tmp0$sysbp_max)
+tmp0$diasbp_min<- as.numeric(tmp0$diasbp_min)
+tmp0$diasbp_max<- as.numeric(tmp0$diasbp_max)
+tmp0$urine_min<- as.numeric(tmp0$urine_min)
+tmp0$urine_mean<- as.numeric(tmp0$urine_mean)
+tmp0$urine_max<- as.numeric(tmp0$urine_max)
+tmp0[,c(7:13, 15:33, 35,36)] = discretize(tmp0[,c(8:13, 15:33, 35,36)], method = 'hartemink', breaks = 4, ibreaks = 5)
+tmp0[,c(14, 34)] = discretize(tmp0[,c(14,34)], breaks =3, method = "quantile")
+
+```
+
+
+## Remove rows with missing data and select a subset of varaibles for exploring purpose
+```{r}
+model.data = na.omit(tmp0[,c(2:6,16:17,22:23,31,32,34,36, 37:38)])
+head(model.data)
+```
+
+# Exploratory Data Analysis (EDA) 
+
+feature selection - tbc
+```{r}
+
+```
+
+
+
+# Building Models
+```{r}
+# plot network function
+# using the visNetwork package to plot the network
+plot.network <- function(structure, ht = "400px"){
+  nodes.uniq <- unique(c(structure$arcs[,1], structure$arcs[,2]))
+  nodes <- data.frame(id = nodes.uniq,
+                      label = nodes.uniq,
+                      color = "darkturquoise",
+                      shadow = TRUE)
+  
+  edges <- data.frame(from = structure$arcs[,1],
+                      to = structure$arcs[,2],
+                      arrows = "to",
+                      smooth = TRUE,
+                      shadow = TRUE,
+                      color = "black")
+  
+  return(visNetwork(nodes, edges, height = ht, width = "100%"))
+}
+
+
+# Structure learning of the BN
+dag  = hc(model.data)
+plot.network(dag)
+
+
+#strength of each arcs
+strength = arc.strength(dag, model.data, criterion = "x2")
+strength
+```
+
+In order to further improve the BN strcuture, we can:
+
+## Conditional independence test for each arc
+
+```{r}
+ci.test("readmission", "prescribed", "gender", data = model.data, test = "mi")
+
+```
+
+## Add backlist and whitelist before learning the structures - tbc
+
+## Use different structure learning approaches
+```{r}
+dag1  = hc(model.data)
+dag2  = tabu(model.data)
+par(mfrow = c(1, 2))
+graphviz.compare(dag1, dag2)
+```
+
+
+
+# Learning Parameters/CPTs
+
+```{r}
+est.para <- bn.fit(dag, data = model.data)
+est.para
+```
+
+```{r fig.width = 3, fig.height = 3}
+# Posterior for a single variable
+bn.fit.barchart(est.para$readmission, xlab = "Probabilities", ylab = "Levels")
+
+```
+
+
+```{r fig.width = 10, fig.height = 20}
+
+# Posterior for the network
+graphviz.chart(est.para, type = "barprob", grid = TRUE, bar.col = "darkgreen",
+               strip.bg = "lightskyblue")
+#graphviz.chart(est.para, type = "barprob", grid = TRUE, bar.col = "green", strip.bg = "lightyellow")
+
+```
+
+
+
+# Model Validation
+```{r warning=FALSE}
+#method 1:
+#training.set = model.data[1:1487, ]
+#test.set = model.data[1488:1859, ]
+#bn = naive.bayes(training.set, "readmission")
+#fitted = bn.fit(bn, training.set)
+#pred = predict(fitted, test.set)
+#table(pred, test.set[, "readmission"])
+
+#method 2:
+xval = bn.cv(model.data, bn = "hc", loss = "pred-lw",loss.args = list(target = "prescribed"))
+xval
+OBS = unlist(lapply(xval, `[[`, "observed"))
+PRED = unlist(lapply(xval, `[[`, "predicted"))
+table(OBS, PRED)
+
+```
+
+compare with other approaches - tbc
+
+# Inference 
+
+## Query for a single variable with evidence
+```{r}
+cpquery(est.para, event = (readmission=="yes"), evidence = list(prescribed = "yes", age = "59_69"),
+        method = "lw")
+```
+
+## Forward sampling
+
+    - For a set of varaibles with no evidence
+```{r}
+cpdist(est.para, nodes = c("readmission", "prescribed", "age", "gender", "marital_status"), evidence = TRUE, n=6)
+```
+
+    - For all varaibles with no evidence
+```{r}
+head(rbn(est.para, 500, model.data))
+```
+
+## Rejection sampling with evidence
+```{r}
+head(cpdist(est.para, nodes = c("readmission", "prescribed", "age"), evidence = (gender == "M")))
+```
+
+
+
+# Intervention 
+```{r}
+## ideal interventions and mutilated networks.
+dag1 = mutilated(dag, evidence = list(prescribed = "yes"))
+plot.network(dag1)
+
+par(mfrow = c(1, 2))
+graphviz.compare(dag, dag1)
+
+```
+
